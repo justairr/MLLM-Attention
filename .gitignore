@@ -1,3 +1,5 @@
 VLMEvalKit/max_pixels
 VLMEvalKit/mid_pixels
 VLMEvalKit/min
+
+__pycache__/
