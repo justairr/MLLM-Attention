@@ -186,38 +186,20 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
         inputs = self.processor(text=text, images=images, videos=videos, padding=True, return_tensors='pt')
         inputs = inputs.to('cuda')
 
-        input_ids = inputs["input_ids"]
-        attention_mask = inputs["attention_mask"]
-        pixel_values = inputs["pixel_values"]
-        image_grid_thw = inputs["image_grid_thw"]
-        
-        inputs_embeds = self.model.model.embed_tokens(input_ids)
-        if pixel_values is not None:
-            pixel_values = pixel_values.type(self.model.visual.get_dtype())
-            image_embeds = self.model.visual(pixel_values, grid_thw=image_grid_thw)
-            n_image_tokens = (input_ids == self.model.config.image_token_id).sum().item()
-            n_image_features = image_embeds.shape[0]
-            if n_image_tokens != n_image_features:
-                raise ValueError(f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {n_image_features}")
-            
-            image_mask = (input_ids == self.model.config.image_token_id).unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)
-            image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
-            inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
-    
-        if attention_mask is not None:
-            attention_mask = attention_mask.to(inputs_embeds.device)
-
-        generated_ids = self.model.generate(inputs_embeds=inputs_embeds, attention_mask=attention_mask, **self.generate_kwargs)
-        output_text = self.processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
-        #generated_ids = [
-        #    output_ids[len(input_ids_):] for input_ids_, output_ids in zip(input_ids, generated_ids)
-        #]
-        #print(generated_ids)
-        #out = self.processor.tokenizer.batch_decode(
-        #    generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
-        #)
-        response = output_text[0]
-        #print(response)
+        output_ids = self.model.generate(
+            **inputs,
+            return_dict_in_generate=True,
+            output_attentions=True,
+            **self.generate_kwargs,
+        )
+        generated_ids = output_ids.sequences
+        generated_ids = [
+            output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs.input_ids, generated_ids)
+        ]
+        out = self.processor.tokenizer.batch_decode(
+            generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
+        )
+        response = out[0]
         if self.post_process:
             resp = response.split('\\boxed{')[-1]
             lt = len(resp)
