@@ -2,5 +2,6 @@ VLMEvalKit/max_pixels
 VLMEvalKit/mid_pixels
 VLMEvalKit/min*
 VLMEvalKit/result*
+infer*
 
 __pycache__/

@@ -72,7 +72,7 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
         max_new_tokens=2048,
         top_p=0.001,
         top_k=1,
-        temperature=0.01,
+        temperature=0,
         repetition_penalty=1.0,
         use_custom_prompt: bool = True,
         system_prompt: str | None = None,
@@ -186,70 +186,11 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
         inputs = self.processor(text=text, images=images, videos=videos, padding=True, return_tensors='pt')
         inputs = inputs.to('cuda')
 
-        output_ids = self.model.generate(
-            **inputs,
-            return_dict_in_generate=True,
-            output_attentions=True,
-            **self.generate_kwargs,
-        )
-
-        output_attn = output_ids.attentions
-        pref_len = output_attn[0][0].shape[3]
-        full_len = output_attn[-1][0].shape[3]
-        prefill_attn = output_attn[0]
-
-        assert prefill_attn[0].shape[0] == 1
-        full_attn = []
-
-        for l, layer in enumerate(prefill_attn):
-            layer = layer.cpu().squeeze(0).float()
-            layer = torch.nn.functional.pad(layer, (0, full_len - pref_len, 0, full_len - pref_len))
-            for i in range(full_len - pref_len):
-                cur_attn = output_attn[i + 1][l].cpu().squeeze(0)[:, 0, :].float()
-                layer[:, pref_len + i, :pref_len + i + 1] = cur_attn
-            full_attn.append(layer)
-
-        mean_attn = torch.stack(full_attn).mean(dim=(0, 1))
-        vision_start_token_idx = inputs['input_ids'][0].tolist().index(self.model.config.vision_start_token_id)
-        vision_end_token_idx = inputs['input_ids'][0].tolist().index(self.model.config.vision_end_token_id)
-
-        image_output_attn = torch.mean(mean_attn[pref_len:, vision_start_token_idx + 1:vision_end_token_idx], dim=0)
-
-        # Calculate dynamic threshold for attention map
-        def calculate_dynamic_threshold(attn, percentile=95):
-            hist = torch.histc(attn, bins=100)
-            cdf = torch.cumsum(hist, dim=0) / torch.sum(hist)
-            threshold = torch.argmax((cdf > percentile / 100).float()).item() / 100
-            return threshold
-
-        threshold = calculate_dynamic_threshold(image_output_attn)
-
-        # Apply weighted attention to vision tokens
-        def weighted_vision_attention(attn_map, keep_percentage, if_linear, linear_start):
-            sorted_attention, sorted_indices = torch.sort(attn_map, descending=True)
-            num_tokens_to_keep = int(len(sorted_attention) * keep_percentage)
-            weight_vision_token = torch.zeros_like(attn_map, dtype=torch.float)
-            weight_vision_token[sorted_indices[:num_tokens_to_keep]] = 1.0
-            if (if_linear==True): 
-                weight_vision_token[sorted_indices[num_tokens_to_keep:]] = torch.linspace(linear_start, 1.0, len(sorted_attention) - num_tokens_to_keep)
-            else:
-                weight_vision_token[sorted_indices[num_tokens_to_keep:]] = 0.0
-            return weight_vision_token
-    
-        keep_perc = os.environ.get('KP', "0.6")
-        keep_perc = float(keep_perc)
-        linear_start = os.environ.get('LS', "0.0")
-        linear_start = float(linear_start)
-        if_linear = os.environ.get('IL', "True")
-        if_linear = if_linear.lower() == "true"
-        weight_vision_token = weighted_vision_attention(image_output_attn, keep_percentage=keep_perc, if_linear=if_linear ,linear_start=linear_start).cuda()
-    
-        # Update image embeddings with the weighted attention
         input_ids = inputs["input_ids"]
         attention_mask = inputs["attention_mask"]
         pixel_values = inputs["pixel_values"]
         image_grid_thw = inputs["image_grid_thw"]
-    
+        
         inputs_embeds = self.model.model.embed_tokens(input_ids)
         if pixel_values is not None:
             pixel_values = pixel_values.type(self.model.visual.get_dtype())
@@ -261,19 +202,22 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
             
             image_mask = (input_ids == self.model.config.image_token_id).unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)
             image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
-            image_embeds *= weight_vision_token[:, None]
             inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
     
         if attention_mask is not None:
             attention_mask = attention_mask.to(inputs_embeds.device)
-    
-        # Generate output based on modified inputs
-        generated_ids = self.model.generate(inputs_embeds=inputs_embeds, **self.generate_kwargs)
-    
-        # Decode the output
-        output_text = self.processor.tokenizer.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
-    
+
+        generated_ids = self.model.generate(inputs_embeds=inputs_embeds, attention_mask=attention_mask, **self.generate_kwargs)
+        output_text = self.processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
+        #generated_ids = [
+        #    output_ids[len(input_ids_):] for input_ids_, output_ids in zip(input_ids, generated_ids)
+        #]
+        #print(generated_ids)
+        #out = self.processor.tokenizer.batch_decode(
+        #    generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
+        #)
         response = output_text[0]
+        #print(response)
         if self.post_process:
             resp = response.split('\\boxed{')[-1]
             lt = len(resp)
@@ -291,8 +235,7 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
                     break
             if end is not None:
                 response = resp[:end]
-    
+
         if self.verbose:
             print(f'\033[32m{response}\033[0m')
-    
         return response
