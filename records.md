@@ -30,6 +30,8 @@ min 768 max 1280
 |                                    | InfoVQA_VAL | 54.3235 |
 | Qwen-modified-keep30%linear[0-0]   | InfoVQA_VAL | 51.9872 |
 | Qwen-modified-keep100%             | InfoVQA_VAL | 54.6141 |
-| Qwen-not-modified                  | InfoVQA_VAL | 53.341  |
+| Qwen-not-modified(inputs_embed)    | InfoVQA_VAL | 53.341  |
 |                                    | InfoVQA_VAL | 61.2975 |
 |                                    | DocVQA_VAL  | 77.9    |
+|                                    | MMMU_DEV    | 0.47    |
+|                                    | MMMU_VAL    | 0.44    |
