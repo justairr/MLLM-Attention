@@ -2,7 +2,7 @@ cd VLMEvalKit
 
 LS=0.9
 KP=0.3
-IL=False
+WT=exp
 DATASET=InfoVQA_VAL
 MODEL=Qwen2-VL-7B-Instruct
 
@@ -11,7 +11,7 @@ HF_HUB_OFFLINE=1 \
 AUTO_SPLIT=1 \
 LS=${LS} \
 KP=${KP} \
-IL=${IL} \
+WT=${WT} \
 python run.py \
 --data ${DATASET} \
 --model ${MODEL} \

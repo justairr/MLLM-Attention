@@ -222,18 +222,17 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
             self.model.config.vision_end_token_id,
         )
 
-        threshold = calculate_dynamic_threshold(vision_attn_score)
+        thresholds = [calculate_dynamic_threshold(v) for v in vision_attn_score]
 
         keep_perc = os.environ.get('KP', "0.6")
         keep_perc = float(keep_perc)
         linear_start = os.environ.get('LS', "0.0")
         linear_start = float(linear_start)
-        if_linear = os.environ.get('IL', "True")
-        if_linear = if_linear.lower() == "true"
+        weighting_type = os.environ.get('WT', "linear")
 
         vision_token_weight_per_image = [
             get_vision_token_weight(
-                v, keep_perc, "linear" if if_linear else "uniform", linear_start
+                v, keep_perc, weighting_type, linear_start
             )
             for v in vision_attn_score
         ]

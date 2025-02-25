@@ -69,7 +69,7 @@ def get_visual_token_mean_attn_score(mean_attn, inputs, vision_start_token_id, v
 def get_vision_token_weight(
     vision_attn_weight,
     keep_percentage,
-    weighting_type: Literal["linear", "uniform"] = "linear",
+    weighting_type: Literal["linear", "exp", "uniform"] | str = "linear",
     lowest_weight=0.0,
 ):
     sorted_indices = torch.argsort(vision_attn_weight, descending=True)
@@ -80,8 +80,14 @@ def get_vision_token_weight(
         weight_vision_token[sorted_indices[num_tokens_to_keep:]] = torch.linspace(
             lowest_weight, 1.0, len(vision_attn_weight) - num_tokens_to_keep
         )
-    else:
+    elif weighting_type == "exp":
+        weight_vision_token[sorted_indices[num_tokens_to_keep:]] = torch.exp(
+            torch.linspace(0, -3, len(sorted_indices) - num_tokens_to_keep)
+        )
+    elif weighting_type == "uniform":
         weight_vision_token[sorted_indices[num_tokens_to_keep:]] = lowest_weight
+    else:
+        raise ValueError(f"Invalid weighting type: {weighting_type}")
     return weight_vision_token
 
 
