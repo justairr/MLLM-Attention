@@ -73,6 +73,7 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
         top_p=0.001,
         top_k=1,
         temperature=0.01,
+        do_sample=False,
         repetition_penalty=1.0,
         use_custom_prompt: bool = True,
         system_prompt: str | None = None,
@@ -86,6 +87,7 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
             max_new_tokens=max_new_tokens,
             top_p=top_p,
             top_k=top_k,
+            do_sample=do_sample,
             temperature=temperature,
             repetition_penalty=repetition_penalty,
         )
@@ -243,7 +245,7 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
             if (if_linear==True): 
                 weight_vision_token[sorted_indices[num_tokens_to_keep:]] = torch.linspace(linear_start, 1.0, len(sorted_attention) - num_tokens_to_keep)
             else:
-                weight_vision_token[sorted_indices[num_tokens_to_keep:]] = 0.0
+                weight_vision_token[sorted_indices[num_tokens_to_keep:]] = torch.exp(torch.linspace(0, -3, len(sorted_attention) - num_tokens_to_keep))
             return weight_vision_token
     
         keep_perc = os.environ.get('KP', "0.6")

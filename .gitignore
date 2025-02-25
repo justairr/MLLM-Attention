@@ -3,5 +3,6 @@ VLMEvalKit/mid_pixels
 VLMEvalKit/min*
 VLMEvalKit/result*
 infer*
+results*
 
 __pycache__/
