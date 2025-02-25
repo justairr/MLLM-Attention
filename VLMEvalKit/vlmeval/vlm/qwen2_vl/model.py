@@ -12,6 +12,18 @@ from ..base import BaseModel
 from .prompt import Qwen2VLPromptMixin
 from ...smp import get_rank_and_world_size, get_gpu_memory, auto_split_flag
 
+try:
+    from .qwen_mod_forward import (
+        get_mean_attn_score,
+        get_visual_token_mean_attn_score,
+        get_vision_token_weight,
+        calculate_dynamic_threshold,
+        patch_forward,
+    )
+except ModuleNotFoundError as err:
+    logging.critical("qwen mod forward not found.")
+    raise err
+
 
 def ensure_image_url(image: str) -> str:
     prefixes = ['http://', 'https://', 'file://', 'data:image;']
@@ -127,13 +139,9 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
             )
             self.model.cuda().eval()
 
-        try:
-            from .qwen_mod_forward import patch_forward
-        except ModuleNotFoundError as err:
-            logging.critical("qwen mod forward not found.")
-            raise err
-        self.model.forward = patch_forward.__get__(self.model, Qwen2VLForConditionalGeneration)
-
+        self.model.forward = patch_forward.__get__(
+            self.model, Qwen2VLForConditionalGeneration
+        )
 
         torch.cuda.empty_cache()
 
@@ -205,82 +213,33 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
             **self.generate_kwargs,
         )
 
-        output_attn = output_ids.attentions
-        pref_len = output_attn[0][0].shape[3]
-        full_len = output_attn[-1][0].shape[3]
-        prefill_attn = output_attn[0]
+        mean_attn_score = get_mean_attn_score(output_ids)
 
-        assert prefill_attn[0].shape[0] == 1
-        full_attn = []
+        vision_attn_score = get_visual_token_mean_attn_score(
+            mean_attn_score,
+            inputs,
+            self.model.config.vision_start_token_id,
+            self.model.config.vision_end_token_id,
+        )
 
-        for l, layer in enumerate(prefill_attn):
-            layer = layer.cpu().squeeze(0).float()
-            layer = torch.nn.functional.pad(layer, (0, full_len - pref_len, 0, full_len - pref_len))
-            for i in range(full_len - pref_len):
-                cur_attn = output_attn[i + 1][l].cpu().squeeze(0)[:, 0, :].float()
-                layer[:, pref_len + i, :pref_len + i + 1] = cur_attn
-            full_attn.append(layer)
+        threshold = calculate_dynamic_threshold(vision_attn_score)
 
-        mean_attn = torch.stack(full_attn).mean(dim=(0, 1))
-        vision_start_token_idx = inputs['input_ids'][0].tolist().index(self.model.config.vision_start_token_id)
-        vision_end_token_idx = inputs['input_ids'][0].tolist().index(self.model.config.vision_end_token_id)
-
-        image_output_attn = torch.mean(mean_attn[pref_len:, vision_start_token_idx + 1:vision_end_token_idx], dim=0)
-
-        # Calculate dynamic threshold for attention map
-        def calculate_dynamic_threshold(attn, percentile=95):
-            hist = torch.histc(attn, bins=100)
-            cdf = torch.cumsum(hist, dim=0) / torch.sum(hist)
-            threshold = torch.argmax((cdf > percentile / 100).float()).item() / 100
-            return threshold
-
-        threshold = calculate_dynamic_threshold(image_output_attn)
-
-        # Apply weighted attention to vision tokens
-        def weighted_vision_attention(attn_map, keep_percentage, if_linear, linear_start):
-            sorted_attention, sorted_indices = torch.sort(attn_map, descending=True)
-            num_tokens_to_keep = int(len(sorted_attention) * keep_percentage)
-            weight_vision_token = torch.zeros_like(attn_map, dtype=torch.float)
-            weight_vision_token[sorted_indices[:num_tokens_to_keep]] = 1.0
-            if (if_linear==True): 
-                weight_vision_token[sorted_indices[num_tokens_to_keep:]] = torch.linspace(linear_start, 1.0, len(sorted_attention) - num_tokens_to_keep)
-            else:
-                weight_vision_token[sorted_indices[num_tokens_to_keep:]] = torch.exp(torch.linspace(0, -3, len(sorted_attention) - num_tokens_to_keep))
-            return weight_vision_token
-    
         keep_perc = os.environ.get('KP', "0.6")
         keep_perc = float(keep_perc)
         linear_start = os.environ.get('LS', "0.0")
         linear_start = float(linear_start)
         if_linear = os.environ.get('IL', "True")
         if_linear = if_linear.lower() == "true"
-        weight_vision_token = weighted_vision_attention(image_output_attn, keep_percentage=keep_perc, if_linear=if_linear ,linear_start=linear_start).cuda()
-    
-        self.model.embed_weight = weight_vision_token
 
-        # Update image embeddings with the weighted attention
-    #    input_ids = inputs["input_ids"]
-    #    attention_mask = inputs["attention_mask"]
-    #    pixel_values = inputs["pixel_values"]
-    #    image_grid_thw = inputs["image_grid_thw"]
-    #
-    #    inputs_embeds = self.model.model.embed_tokens(input_ids)
-    #    if pixel_values is not None:
-    #        pixel_values = pixel_values.type(self.model.visual.get_dtype())
-    #        image_embeds = self.model.visual(pixel_values, grid_thw=image_grid_thw)
-    #        n_image_tokens = (input_ids == self.model.config.image_token_id).sum().item()
-    #        n_image_features = image_embeds.shape[0]
-    #        if n_image_tokens != n_image_features:
-    #            raise ValueError(f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {n_image_features}")
-    #        
-    #        image_mask = (input_ids == self.model.config.image_token_id).unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)
-    #        image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
-    #        image_embeds *= weight_vision_token[:, None]
-    #        inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
-    #
-    #    if attention_mask is not None:
-    #        attention_mask = attention_mask.to(inputs_embeds.device)
-    
+        vision_token_weight_per_image = [
+            get_vision_token_weight(
+                v, keep_perc, "linear" if if_linear else "uniform", linear_start
+            )
+            for v in vision_attn_score
+        ]
+
+        self.model.embed_weight = torch.concat(vision_token_weight_per_image, dim=0).to(self.model.device)
+
         # Generate output based on modified inputs
         generated_ids = self.model.generate(**inputs, **self.generate_kwargs)
     

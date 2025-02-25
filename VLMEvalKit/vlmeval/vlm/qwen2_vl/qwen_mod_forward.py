@@ -1,6 +1,89 @@
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union, Literal
 import torch
 from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VLCausalLMOutputWithPast
+
+# Calculate dynamic threshold for attention map
+def calculate_dynamic_threshold(attn, percentile=95):
+    hist = torch.histc(attn, bins=100)
+    cdf = torch.cumsum(hist, dim=0) / torch.sum(hist)
+    threshold = torch.argmax((cdf > percentile / 100).float()).item() / 100
+    return threshold
+
+
+def get_mean_attn_score(output_ids) -> torch.Tensor:
+    r"""
+    get the mean attention weights of the prefilling and full attention
+    Args:
+        output_ids: the output ids of the model
+    Returns:
+        mean_attn: the mean attention weights of the prefilling and full attention, shape: (L, L)
+    """
+    output_attn = output_ids.attentions
+    pref_len = output_attn[0][0].shape[3]
+    full_len = output_attn[-1][0].shape[3]
+    prefill_attn = output_attn[0]
+    assert prefill_attn[0].shape[0] == 1, "batch size should be 1"
+    full_attn = []
+
+    for l, layer in enumerate(prefill_attn):
+        layer = layer.cpu().squeeze(0).float()
+        layer = torch.nn.functional.pad(layer, (0, full_len - pref_len, 0, full_len - pref_len))
+        for i in range(full_len - pref_len):
+            cur_attn = output_attn[i + 1][l].cpu().squeeze(0)[:, 0, :].float()
+            layer[:, pref_len + i, :pref_len + i + 1] = cur_attn
+        full_attn.append(layer)
+    mean_attn = torch.stack(full_attn).mean(dim=(0, 1))
+    return mean_attn
+
+
+def get_visual_token_mean_attn_score(mean_attn, inputs, vision_start_token_id, vision_end_token_id) -> Tuple[torch.Tensor, ...]:
+    r"""
+    Get the attention weights of the visual tokens
+    Args:
+        mean_attn: the mean attention weights of the prefilling and full attention, shape: (L, L)
+        inputs: the inputs of the model
+    Returns:
+        visual_token_attn_weights: the tuple of the attention weights of the visual tokens, each element shape: (V, V)
+    """
+    assert inputs["input_ids"].shape[0] == 1, "batch size should be 1"
+    pref_len = len(inputs['input_ids'][0])
+    vision_start_token_indices = torch.where(
+        inputs["input_ids"][0] == vision_start_token_id
+    )[0]
+    vision_end_token_indices = torch.where(
+        inputs["input_ids"][0] == vision_end_token_id
+    )[0]
+    # assert len(vision_start_token_indices) == len(vision_end_token_indices), "vision start and end token idx should be the same"
+    # print(vision_start_token_indices)
+    # print(vision_end_token_indices)
+    # iterate over multiple images
+    visual_token_attn_weights = tuple(
+        torch.mean(mean_attn[pref_len:, s + 1 : e], dim=0)
+        for s, e in zip(
+            vision_start_token_indices, vision_end_token_indices, strict=True
+        )
+    )
+    return visual_token_attn_weights
+
+
+def get_vision_token_weight(
+    vision_attn_weight,
+    keep_percentage,
+    weighting_type: Literal["linear", "uniform"] = "linear",
+    lowest_weight=0.0,
+):
+    sorted_indices = torch.argsort(vision_attn_weight, descending=True)
+    num_tokens_to_keep = int(len(vision_attn_weight) * keep_percentage)
+    weight_vision_token = torch.zeros_like(vision_attn_weight, dtype=torch.float)
+    weight_vision_token[sorted_indices[:num_tokens_to_keep]] = 1.0
+    if weighting_type == "linear":
+        weight_vision_token[sorted_indices[num_tokens_to_keep:]] = torch.linspace(
+            lowest_weight, 1.0, len(vision_attn_weight) - num_tokens_to_keep
+        )
+    else:
+        weight_vision_token[sorted_indices[num_tokens_to_keep:]] = lowest_weight
+    return weight_vision_token
+
 
 def patch_forward(
         self,
