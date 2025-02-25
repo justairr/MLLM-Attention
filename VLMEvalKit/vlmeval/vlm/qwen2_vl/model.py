@@ -16,7 +16,7 @@ try:
     from .qwen_mod_forward import (
         get_mean_attn_score,
         get_visual_token_mean_attn_score,
-        get_vision_token_weight,
+        get_visual_token_weight,
         calculate_dynamic_threshold,
         patch_forward,
     )
@@ -215,26 +215,28 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
 
         mean_attn_score = get_mean_attn_score(output_ids)
 
-        vision_attn_score = get_visual_token_mean_attn_score(
+        visual_token_attn_score = get_visual_token_mean_attn_score(
             mean_attn_score,
             inputs,
             self.model.config.vision_start_token_id,
             self.model.config.vision_end_token_id,
         )
 
-        thresholds = [calculate_dynamic_threshold(v) for v in vision_attn_score]
+        thresholds = [calculate_dynamic_threshold(v) for v in visual_token_attn_score]
 
         keep_perc = os.environ.get('KP', "0.6")
         keep_perc = float(keep_perc)
         linear_start = os.environ.get('LS', "0.0")
         linear_start = float(linear_start)
         weighting_type = os.environ.get('WT', "linear")
+        dynamic_threshold = os.environ.get('DY', "False")
+        dynamic_threshold = dynamic_threshold.lower() == "true"
 
         vision_token_weight_per_image = [
-            get_vision_token_weight(
-                v, keep_perc, weighting_type, linear_start
+            get_visual_token_weight(
+                v, t if dynamic_threshold else keep_perc, weighting_type, linear_start
             )
-            for v in vision_attn_score
+            for v, t in zip(visual_token_attn_score, thresholds, strict=True)
         ]
 
         self.model.embed_weight = torch.concat(vision_token_weight_per_image, dim=0).to(self.model.device)
