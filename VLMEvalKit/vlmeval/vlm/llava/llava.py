@@ -9,6 +9,17 @@ from ...dataset import DATASET_TYPE, DATASET_MODALITY
 import copy
 import requests
 
+try:
+    from .llava_patch import (
+        calculate_dynamic_threshold,
+        get_mean_attn_score,
+        get_visual_token_mean_attn_score_llava,
+        get_visual_token_weight,
+        patch_prepare
+    )
+except ModuleNotFoundError as err:
+    logging.critical("qwen mod forward not found.")
+    raise err
 
 class LLaVA(BaseModel):
 
@@ -214,6 +225,41 @@ class LLaVA(BaseModel):
         stopping_criteria = KeywordsStoppingCriteria(
             keywords, self.tokenizer, input_ids
         )
+
+        with torch.inference_mode():
+            outputs = self.model.generate(
+                input_ids,
+                images=image_tensor,
+                return_dict_in_generate=True,
+                output_attentions=True,
+                stopping_criteria=[stopping_criteria],
+                **self.kwargs,
+            )
+
+        aw, pref_len, full_len = get_mean_attn_score(outputs)
+
+        vw = get_visual_token_mean_attn_score_llava(aw, input_ids, pref_len)
+
+        thresholds = [calculate_dynamic_threshold(v) for v in vw]
+
+        keep_perc = os.environ.get('KP', "0.6")
+        keep_perc = float(keep_perc)
+        linear_start = os.environ.get('LS', "0.0")
+        linear_start = float(linear_start)
+        weighting_type = os.environ.get('WT', "linear")
+        dynamic_threshold = os.environ.get('DY', "False")
+        dynamic_threshold = dynamic_threshold.lower() == "true"
+
+        vision_token_weight_per_image = [
+            get_visual_token_weight(
+                v, t if dynamic_threshold else keep_perc, weighting_type, linear_start
+            )
+            for v, t in zip(vw, thresholds, strict=True)
+        ]
+
+        self.model.embed_weight = torch.concat(vision_token_weight_per_image, dim=0).to(self.model.device)
+
+
         with torch.inference_mode():
             output_ids = self.model.generate(
                 input_ids,
