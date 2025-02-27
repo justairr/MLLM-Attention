@@ -12,18 +12,6 @@ from ..base import BaseModel
 from .prompt import Qwen2VLPromptMixin
 from ...smp import get_rank_and_world_size, get_gpu_memory, auto_split_flag
 
-try:
-    from .qwen_mod_forward import (
-        get_mean_attn_score,
-        get_visual_token_mean_attn_score,
-        get_visual_token_weight,
-        calculate_dynamic_threshold,
-        patch_forward,
-    )
-except ModuleNotFoundError as err:
-    logging.critical("qwen mod forward not found.")
-    raise err
-
 
 def ensure_image_url(image: str) -> str:
     prefixes = ['http://', 'https://', 'file://', 'data:image;']
@@ -85,7 +73,6 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
         top_p=0.001,
         top_k=1,
         temperature=0.01,
-        do_sample=False,
         repetition_penalty=1.0,
         use_custom_prompt: bool = True,
         system_prompt: str | None = None,
@@ -99,7 +86,6 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
             max_new_tokens=max_new_tokens,
             top_p=top_p,
             top_k=top_k,
-            do_sample=do_sample,
             temperature=temperature,
             repetition_penalty=repetition_penalty,
         )
@@ -138,10 +124,6 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
                 model_path, torch_dtype='auto', device_map='cpu', attn_implementation='eager'
             )
             self.model.cuda().eval()
-
-        self.model.forward = patch_forward.__get__(
-            self.model, Qwen2VLForConditionalGeneration
-        )
 
         torch.cuda.empty_cache()
 
@@ -204,8 +186,6 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
         inputs = self.processor(text=text, images=images, videos=videos, padding=True, return_tensors='pt')
         inputs = inputs.to('cuda')
 
-        self.model.embed_weight = None
-
         output_ids = self.model.generate(
             **inputs,
             return_dict_in_generate=True,
@@ -213,46 +193,88 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
             **self.generate_kwargs,
         )
 
-        mean_attn_score = get_mean_attn_score(output_ids)
+        output_attn = output_ids.attentions
+        pref_len = output_attn[0][0].shape[3]
+        full_len = output_attn[-1][0].shape[3]
+        prefill_attn = output_attn[0]
 
-        visual_token_attn_score = get_visual_token_mean_attn_score(
-            mean_attn_score,
-            inputs,
-            self.model.config.vision_start_token_id,
-            self.model.config.vision_end_token_id,
-        )
+        assert prefill_attn[0].shape[0] == 1
+        full_attn = []
 
-        #thresholds = [calculate_dynamic_threshold(v) for v in visual_token_attn_score]
+        for l, layer in enumerate(prefill_attn):
+            layer = layer.cpu().squeeze(0).float()
+            layer = torch.nn.functional.pad(layer, (0, full_len - pref_len, 0, full_len - pref_len))
+            for i in range(full_len - pref_len):
+                cur_attn = output_attn[i + 1][l].cpu().squeeze(0)[:, 0, :].float()
+                layer[:, pref_len + i, :pref_len + i + 1] = cur_attn
+            full_attn.append(layer)
 
+        mean_attn = torch.stack(full_attn).mean(dim=(0, 1))
+        vision_start_token_idx = inputs['input_ids'][0].tolist().index(self.model.config.vision_start_token_id)
+        vision_end_token_idx = inputs['input_ids'][0].tolist().index(self.model.config.vision_end_token_id)
+
+        image_output_attn = torch.mean(mean_attn[pref_len:, vision_start_token_idx + 1:vision_end_token_idx], dim=0)
+
+        # Calculate dynamic threshold for attention map
+        def calculate_dynamic_threshold(attn, percentile=95):
+            hist = torch.histc(attn, bins=100)
+            cdf = torch.cumsum(hist, dim=0) / torch.sum(hist)
+            threshold = torch.argmax((cdf > percentile / 100).float()).item() / 100
+            return threshold
+
+        threshold = calculate_dynamic_threshold(image_output_attn)
+
+        # Apply weighted attention to vision tokens
+        def weighted_vision_attention(attn_map, keep_percentage, if_linear, linear_start):
+            sorted_attention, sorted_indices = torch.sort(attn_map, descending=True)
+            num_tokens_to_keep = int(len(sorted_attention) * keep_percentage)
+            weight_vision_token = torch.zeros_like(attn_map, dtype=torch.float)
+            weight_vision_token[sorted_indices[:num_tokens_to_keep]] = 1.0
+            if (if_linear==True): 
+                weight_vision_token[sorted_indices[num_tokens_to_keep:]] = torch.linspace(linear_start, 1.0, len(sorted_attention) - num_tokens_to_keep)
+            else:
+                weight_vision_token[sorted_indices[num_tokens_to_keep:]] = linear_startw
+            return weight_vision_token
+    
         keep_perc = os.environ.get('KP', "0.6")
         keep_perc = float(keep_perc)
-        keep_weight = os.environ.get('KW', "1.0")
-        keep_weight = float(keep_weight)
         linear_start = os.environ.get('LS', "0.0")
         linear_start = float(linear_start)
-        weighting_type = os.environ.get('WT', "linear")
-        #dynamic_threshold = os.environ.get('DY', "False")
-        #dynamic_threshold = dynamic_threshold.lower() == "true"
-
-        vision_token_weight_per_image = [
-            get_visual_token_weight(
-                v, keep_perc, keep_weight, weighting_type, linear_start
-            )
-            for v in visual_token_attn_score
-        ]
-
-        self.model.embed_weight = torch.concat(vision_token_weight_per_image, dim=0).to(self.model.device)
-
-        # Generate output based on modified inputs
-        generated_ids = self.model.generate(**inputs, **self.generate_kwargs)
+        if_linear = os.environ.get('IL', "True")
+        if_linear = if_linear.lower() == "true"
+        weight_vision_token = weighted_vision_attention(image_output_attn, keep_percentage=keep_perc, if_linear=if_linear ,linear_start=linear_start).cuda()
     
-        generated_ids = [
-            output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs.input_ids, generated_ids)
-        ]
-        out = self.processor.tokenizer.batch_decode(
-            generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
-        )
-        response = out[0]
+    
+        # Update image embeddings with the weighted attention
+        input_ids = inputs["input_ids"]
+        attention_mask = inputs["attention_mask"]
+        pixel_values = inputs["pixel_values"]
+        image_grid_thw = inputs["image_grid_thw"]
+    
+        inputs_embeds = self.model.model.embed_tokens(input_ids)
+        if pixel_values is not None:
+            pixel_values = pixel_values.type(self.model.visual.get_dtype())
+            image_embeds = self.model.visual(pixel_values, grid_thw=image_grid_thw)
+            n_image_tokens = (input_ids == self.model.config.image_token_id).sum().item()
+            n_image_features = image_embeds.shape[0]
+            if n_image_tokens != n_image_features:
+                raise ValueError(f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {n_image_features}")
+            
+            image_mask = (input_ids == self.model.config.image_token_id).unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)
+            image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+            image_embeds *= weight_vision_token[:, None]
+            inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
+    
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(inputs_embeds.device)
+    
+        # Generate output based on modified inputs
+        generated_ids = self.model.generate(inputs_embeds=inputs_embeds, **self.generate_kwargs)
+    
+        # Decode the output
+        output_text = self.processor.tokenizer.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
+    
+        response = output_text[0]
         if self.post_process:
             resp = response.split('\\boxed{')[-1]
             lt = len(resp)
