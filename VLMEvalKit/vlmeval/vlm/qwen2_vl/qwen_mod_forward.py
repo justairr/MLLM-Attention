@@ -69,13 +69,14 @@ def get_visual_token_mean_attn_score(mean_attn, inputs, vision_start_token_id, v
 def get_visual_token_weight(
     visual_token_attn_score,
     threshold,
+    keep_weight,
     weighting_type: Literal["linear", "exp", "uniform"] | str = "linear",
     lowest_weight=0.0,
 ):
     sorted_indices = torch.argsort(visual_token_attn_score, descending=True)
     num_tokens_to_keep = int(len(visual_token_attn_score) * threshold)
     weight_vision_token = torch.zeros_like(visual_token_attn_score, dtype=torch.float)
-    weight_vision_token[sorted_indices[:num_tokens_to_keep]] = 1.2
+    weight_vision_token[sorted_indices[:num_tokens_to_keep]] = keep_weight
     if weighting_type == "linear":
         weight_vision_token[sorted_indices[num_tokens_to_keep:]] = torch.linspace(
             lowest_weight, 1.0, len(visual_token_attn_score) - num_tokens_to_keep

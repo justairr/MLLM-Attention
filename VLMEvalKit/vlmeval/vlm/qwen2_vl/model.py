@@ -226,6 +226,8 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
 
         keep_perc = os.environ.get('KP', "0.6")
         keep_perc = float(keep_perc)
+        keep_weight = os.environ.get('KW', "1.0")
+        keep_weight = float(keep_weight)
         linear_start = os.environ.get('LS', "0.0")
         linear_start = float(linear_start)
         weighting_type = os.environ.get('WT', "linear")
@@ -234,7 +236,7 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
 
         vision_token_weight_per_image = [
             get_visual_token_weight(
-                v, keep_perc, weighting_type, linear_start
+                v, keep_perc, keep_weight, weighting_type, linear_start
             )
             for v in visual_token_attn_score
         ]
