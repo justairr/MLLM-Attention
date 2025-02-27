@@ -1,4 +1,5 @@
 from typing import List, Optional, Tuple, Union, Literal
+from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN, IGNORE_INDEX
 import torch
 
 def calculate_dynamic_threshold(visual_token_attn_score, percentile=95):
@@ -138,6 +139,7 @@ def patch_prepare(
             image_features = self.encode_images(images)
 
         if self.embed_weight is not None:
+            print(self.embed_weight)
             image_features *= self.embed_weight[:, None].to(image_features.device)
 
         # TODO: image start / end is not implemented here to support pretraining.

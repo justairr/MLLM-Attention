@@ -8,6 +8,7 @@ from ...smp import *
 from ...dataset import DATASET_TYPE, DATASET_MODALITY
 import copy
 import requests
+from llava.model.language_model.llava_llama import LlavaLlamaForCausalLM
 
 try:
     from .llava_patch import (
@@ -89,6 +90,8 @@ class LLaVA(BaseModel):
         warnings.warn(
             f"Following kwargs received: {self.kwargs}, will use as generation config. "
         )
+
+        self.model.prepare_inputs_labels_for_multimodal = patch_prepare.__get__(self.model, LlavaLlamaForCausalLM)
 
     def use_custom_prompt(self, dataset):
         assert dataset is not None
@@ -226,6 +229,10 @@ class LLaVA(BaseModel):
             keywords, self.tokenizer, input_ids
         )
 
+        #print(message)
+
+        self.model.embed_weight = None
+
         with torch.inference_mode():
             outputs = self.model.generate(
                 input_ids,
@@ -240,21 +247,22 @@ class LLaVA(BaseModel):
 
         vw = get_visual_token_mean_attn_score_llava(aw, input_ids, pref_len)
 
-        thresholds = [calculate_dynamic_threshold(v) for v in vw]
+        # thresholds = [calculate_dynamic_threshold(v) for v in vw]
+        thresholds = []
 
         keep_perc = os.environ.get('KP', "0.6")
         keep_perc = float(keep_perc)
         linear_start = os.environ.get('LS', "0.0")
         linear_start = float(linear_start)
         weighting_type = os.environ.get('WT', "linear")
-        dynamic_threshold = os.environ.get('DY', "False")
-        dynamic_threshold = dynamic_threshold.lower() == "true"
+        # dynamic_threshold = os.environ.get('DY', "False")
+        # dynamic_threshold = dynamic_threshold.lower() == "true"
 
         vision_token_weight_per_image = [
             get_visual_token_weight(
-                v, t if dynamic_threshold else keep_perc, weighting_type, linear_start
+                v, keep_perc, weighting_type, linear_start
             )
-            for v, t in zip(vw, thresholds, strict=True)
+            for v in vw
         ]
 
         self.model.embed_weight = torch.concat(vision_token_weight_per_image, dim=0).to(self.model.device)
