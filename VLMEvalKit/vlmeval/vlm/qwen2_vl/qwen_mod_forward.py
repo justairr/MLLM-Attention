@@ -84,11 +84,11 @@ def get_visual_token_weight(
     weight_vision_token[sorted_indices[:num_tokens_to_keep]] = keep_weight
     if weighting_type == "linear":
         weight_vision_token[sorted_indices[num_tokens_to_keep:]] = torch.linspace(
-            lowest_weight, 1.0, len(visual_token_attn_score) - num_tokens_to_keep
+            1.0, lowest_weight, len(visual_token_attn_score) - num_tokens_to_keep
         )
     elif weighting_type == "exp":
         weight_vision_token[sorted_indices[num_tokens_to_keep:]] = torch.exp(
-            torch.linspace(0, -3, len(sorted_indices) - num_tokens_to_keep)
+            torch.linspace(0, lowest_weight, len(sorted_indices) - num_tokens_to_keep)
         )
     elif weighting_type == "uniform":
         weight_vision_token[sorted_indices[num_tokens_to_keep:]] = lowest_weight
