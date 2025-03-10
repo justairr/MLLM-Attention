@@ -68,18 +68,21 @@ min 768 max 1280
 |                                    | TextVQA_VAL        | 70.434          |
 |                                    | MMMU_DEV           | 0.4             |
 |                                    | MMMU_VAL           | 0.4944          |
+| Llava keep30%exp                   | infoVQA_VAL        | 15.5446         |
 | QwenVL2 keep30%linear[0.0~1]       | infoVQA_VAL        | 46.2952         |
 |                                    | TextVQA_VAL        | 70.18           |
 | QwenVL2 keep30%linear[0.3~1]       | infoVQA_VAL        | 47.2121         |
 |                                    | TextVQA_VAL        | 70.376          |
 |                                    | MMMU_DEV           | 0.44            |
 |                                    | MMMU_VAL           | 0.5044          |
+| Llava keep30%linear[0.3~1]         | TextVQA_VAL        | 22.34           |
 | QwenVL2 keep30%linear[0.6~1]       | MMMU_DEV           | 0.46            |
 |                                    | MMMU_VAL           | 0.4867          |
 |                                    | ChartQA_TEST       | 64.6            |
 |                                    | MMBench_DEV_EN_V11 | 0.76238         |
 |                                    | InfoVQA_VAL        | 47.7767         |
-|                                    |                    |                 |
+| Llava keep30%linear[0.6~1]         | infoVQA_VAL        | 14.6967         |
+|                                    | TextVQA_VAL        | 22.34           |
 | QwenVL2 keep30%linear[0.9~1]       | MMMU_DEV           | 0.42            |
 |                                    | MMMU_VAL           | 0.4967          |
 |                                    | ChartQA_TEST       | 64.72           |
@@ -97,6 +100,9 @@ min 768 max 1280
 |                                    | MME                | 1676.14         |
 |                                    | MMBench_DEV_EN_V11 | 0.76006         |
 | Llava keep100%                    | infoVQA_VAL        | 14.6325         |
+|                                    | DocVQA_VAL         | 13.3647         |
+|                                    | ChartQA            | 14.12           |
+|                                    | TextVQA_VAL        | 21.94           |
 | QwenVL2 keep3 x105%                | ChartQA_TEST       | 64.88           |
 | QwenVL2 keep3 x110%                | ChartQA_TEST       | 64.36           |
 | QwenVL2 keep3 x115%                | ChartQA_TEST       | 64.08           |
@@ -104,6 +110,8 @@ min 768 max 1280
 | QwenVL2 keep30%linear[0.3~1] x1.2  | TextVQA_VAL        | 70.466          |
 | QwenVL2 keep30%linear[0.3~1] x1.4  | TextVQA_VAL        | 70.856          |
 | QwenVL2 keep30%linear[0.3~1] x1.5  | TextVQA_VAL        | 70.882          |
+|                                    | ChartQA_TEST       | 63.76           |
+|                                    | MMBench_DEV_EN_V11 | 0.76006         |
 | QwenVL2 keep30%linear[0.3~1] x1.75 | TextVQA_VAL        | 70.534          |
 | QwenVL2 keep30%linear[0.3~1] x2    | TextVQA_VAL        | 70.03           |
 | QwenVL2 keep30%linear[0.3~1] x2.5  | TextVQA_VAL        | 69.308          |
