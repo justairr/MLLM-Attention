@@ -8,19 +8,7 @@ from ...smp import *
 from ...dataset import DATASET_TYPE, DATASET_MODALITY
 import copy
 import requests
-from llava.model.language_model.llava_llama import LlavaLlamaForCausalLM
 
-try:
-    from .llava_patch import (
-        calculate_dynamic_threshold,
-        get_mean_attn_score,
-        get_visual_token_mean_attn_score_llava,
-        get_visual_token_weight,
-        patch_prepare
-    )
-except ModuleNotFoundError as err:
-    logging.critical("qwen mod forward not found.")
-    raise err
 
 class LLaVA(BaseModel):
 
@@ -57,7 +45,6 @@ class LLaVA(BaseModel):
                     model_path=model_path,
                     model_base=None,
                     model_name=model_name,
-                    device="cpu",
                     device_map="cpu",
                 )
             )
@@ -80,7 +67,7 @@ class LLaVA(BaseModel):
         kwargs_default = dict(
             do_sample=False,
             temperature=0,
-            max_new_tokens=512,
+            max_new_tokens=2048,
             top_p=None,
             num_beams=1,
             use_cache=True,
@@ -90,8 +77,6 @@ class LLaVA(BaseModel):
         warnings.warn(
             f"Following kwargs received: {self.kwargs}, will use as generation config. "
         )
-
-        self.model.prepare_inputs_labels_for_multimodal = patch_prepare.__get__(self.model, LlavaLlamaForCausalLM)
 
     def use_custom_prompt(self, dataset):
         assert dataset is not None
@@ -228,46 +213,6 @@ class LLaVA(BaseModel):
         stopping_criteria = KeywordsStoppingCriteria(
             keywords, self.tokenizer, input_ids
         )
-
-        #print(message)
-
-        self.model.embed_weight = None
-
-        with torch.inference_mode():
-            outputs = self.model.generate(
-                input_ids,
-                images=image_tensor,
-                return_dict_in_generate=True,
-                output_attentions=True,
-                stopping_criteria=[stopping_criteria],
-                **self.kwargs,
-            )
-
-        aw, pref_len, full_len = get_mean_attn_score(outputs)
-
-        vw = get_visual_token_mean_attn_score_llava(aw, input_ids, pref_len)
-
-        # thresholds = [calculate_dynamic_threshold(v) for v in vw]
-        thresholds = []
-
-        keep_perc = os.environ.get('KP', "0.6")
-        keep_perc = float(keep_perc)
-        linear_start = os.environ.get('LS', "0.0")
-        linear_start = float(linear_start)
-        weighting_type = os.environ.get('WT', "linear")
-        # dynamic_threshold = os.environ.get('DY', "False")
-        # dynamic_threshold = dynamic_threshold.lower() == "true"
-
-        vision_token_weight_per_image = [
-            get_visual_token_weight(
-                v, keep_perc, weighting_type, linear_start
-            )
-            for v in vw
-        ]
-
-        self.model.embed_weight = torch.concat(vision_token_weight_per_image, dim=0).to(self.model.device)
-
-
         with torch.inference_mode():
             output_ids = self.model.generate(
                 input_ids,
@@ -341,7 +286,7 @@ class LLaVA_Next(BaseModel):
         model = model.eval()
         self.model = model.cuda()
         kwargs_default = dict(
-            do_sample=False, temperature=0, max_new_tokens=512, top_p=None, num_beams=1
+            do_sample=False, temperature=0, max_new_tokens=2048, top_p=None, num_beams=1
         )
         kwargs_default.update(kwargs)
         self.kwargs = kwargs_default
@@ -540,7 +485,7 @@ class LLaVA_Next2(BaseModel):
             images=image_tensor,
             do_sample=False,
             temperature=0,
-            max_new_tokens=512,
+            max_new_tokens=2048,
             stopping_criteria=[stopping_criteria],
         )
         text_outputs = self.tokenizer.batch_decode(cont, skip_special_tokens=True)[0]
@@ -721,7 +666,7 @@ class LLaVA_OneVision(BaseModel):
             image_sizes=image_sizes,  # Pass the image sizes here
             do_sample=False,
             temperature=0,
-            max_new_tokens=512,
+            max_new_tokens=2048,
             stopping_criteria=[stopping_criteria],
         )
         text_outputs = self.tokenizer.batch_decode(cont, skip_special_tokens=True)[0]
@@ -743,7 +688,7 @@ class LLaVA_OneVision(BaseModel):
             )
 
         video_frames, frame_time, video_time = self.load_video(
-            videos[0], self.nframe, self.force_sample
+            videos[0], self.nframe, 1, self.force_sample
         )
 
         time_instruciton = (
@@ -793,7 +738,7 @@ class LLaVA_OneVision(BaseModel):
             image_sizes=image_sizes,  # Pass the image sizes here
             do_sample=False,
             temperature=0,
-            max_new_tokens=512,
+            max_new_tokens=2048,
             modalities=modalities,
             stopping_criteria=[stopping_criteria],
         )
@@ -843,13 +788,14 @@ class LLaVA_OneVision_HF(BaseModel):
         assert model_path is not None, "Model path must be provided."
         self.model = LlavaOnevisionForConditionalGeneration.from_pretrained(
             model_path, torch_dtype=torch.float16, low_cpu_mem_usage=True
-        ).to(0)
+        ).to('cuda')
         self.processor = AutoProcessor.from_pretrained(model_path)
 
         self.video_kwargs = kwargs.get("video_kwargs", {})
         self.force_sample = self.video_kwargs.get("force_sample", False)
         self.nframe = kwargs.get("nframe", 8)
         self.fps = 1
+        self.model_path = model_path
 
     def generate_inner_image(self, message, dataset=None):
         content, images = "", []
@@ -868,16 +814,15 @@ class LLaVA_OneVision_HF(BaseModel):
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": content.split("\n", 1)[-1]},
-                    {"type": "image"},
+                    {"type": "text", "text": content},
                 ],
             }
         ]
         prompt = self.processor.apply_chat_template(conversation, add_generation_prompt=True)
-        inputs = self.processor(images=images, text=prompt, return_tensors="pt").to(0, torch.float16)
+        inputs = self.processor(images=images, text=prompt, return_tensors="pt").to('cuda', torch.float16)
 
-        output = self.model.generate(**inputs, max_new_tokens=100)
-        return self.processor.decode(output[0], skip_special_tokens=True)
+        output = self.model.generate(**inputs, max_new_tokens=2048)
+        return self.processor.decode(output[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
 
     def generate_inner_video(self, message, dataset=None):
         content, text_content, visual_content, videos = "", "", "", []
@@ -912,9 +857,9 @@ class LLaVA_OneVision_HF(BaseModel):
         ]
         prompt = self.processor.apply_chat_template(conversation, add_generation_prompt=True)
 
-        inputs = self.processor(videos=video_frames, text=prompt, return_tensors="pt").to(0, torch.float16)
-        output = self.model.generate(**inputs, max_new_tokens=512)
-        return self.processor.decode(output[0], skip_special_tokens=True)
+        inputs = self.processor(videos=video_frames, text=prompt, return_tensors="pt").to('cuda', torch.float16)
+        output = self.model.generate(**inputs, max_new_tokens=2048)
+        return self.processor.decode(output[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
 
     def load_video(self, video_path, max_frames_num, fps=1, force_sample=False):
         from decord import VideoReader, cpu

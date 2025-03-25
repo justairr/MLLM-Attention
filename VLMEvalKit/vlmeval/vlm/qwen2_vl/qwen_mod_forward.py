@@ -2,6 +2,9 @@ from typing import List, Optional, Tuple, Union, Literal
 import torch
 from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VLCausalLMOutputWithPast
 
+import numpy as np
+from PIL import Image
+from IPython.display import display
 
 # Calculate dynamic threshold for attention map
 def calculate_dynamic_threshold(visual_token_attn_score, percentile=95):
@@ -10,6 +13,34 @@ def calculate_dynamic_threshold(visual_token_attn_score, percentile=95):
     threshold = torch.argmax((cdf > percentile / 100).float()).item() / 100
     return threshold
 
+def generate_images(image_list, mode="noise", color=(255, 255, 255)):
+    """
+    根据 `mode` 生成与 `image_list` 中图像等大的随机噪声或纯色图像。
+
+    参数：
+    - image_list: list[PIL.Image]，输入的图像列表。
+    - mode: str，"noise" 生成随机噪声图像，"blank" 生成纯色图像。
+    - color: tuple，生成纯色图像时的颜色，默认为白色 (255, 255, 255)。
+
+    返回：
+    - list[PIL.Image]，生成的图像列表。
+    """
+    generated_images = []
+    
+    for img in image_list:
+        width, height = img.size
+        
+        if mode == "noise":
+            noise_array = np.random.randint(0, 256, (height, width, 3), dtype=np.uint8)
+            generated_image = Image.fromarray(noise_array)
+        elif mode == "blank":
+            generated_image = Image.new("RGB", (width, height), color)
+        else:
+            raise ValueError("mode could only be 'noise' or 'blank'")
+        
+        generated_images.append(generated_image)
+    
+    return generated_images
 
 def get_mean_attn_score(output_ids) -> torch.Tensor:
     r"""
@@ -75,9 +106,18 @@ def get_visual_token_weight(
     visual_token_attn_score,
     threshold,
     keep_weight,
-    weighting_type: Literal["linear", "exp", "uniform"] | str = "linear",
+    weighting_type: Literal["linear", "exp", "uniform", "suppress"] | str = "linear",
     lowest_weight=0.0,
+    neg_attn_weight=None,
+    suppress_alpha=0.5,
 ):
+    if weighting_type == "suppress":
+        if neg_attn_weight is None:
+            raise ValueError("neg_attn_weight must be provided for suppress mode")
+        # 使用负样例注意力权重进行抑制
+        weight_vision_token = 1 - suppress_alpha * neg_attn_weight
+        return weight_vision_token
+
     sorted_indices = torch.argsort(visual_token_attn_score, descending=True)
     num_tokens_to_keep = int(len(visual_token_attn_score) * threshold)
     weight_vision_token = torch.zeros_like(visual_token_attn_score, dtype=torch.float)
