@@ -11,13 +11,15 @@ import torch
 from ..base import BaseModel
 from .prompt import Qwen2VLPromptMixin
 from ...smp import get_rank_and_world_size, get_gpu_memory, auto_split_flag
-from qwen_vl_utils import smart_resize
+
 try:
-    from .qwen import (
-        bbox_from_att_image_adaptive,
-        Qwen2VLForAttnExtraction,
+    from .qwen_mod_forward import (
+        get_mean_attn_score,
+        get_visual_token_mean_attn_score,
+        get_visual_token_weight,
+        calculate_dynamic_threshold,
         patch_forward,
-        reweighted_vision_tokens
+        generate_images
     )
 except ModuleNotFoundError as err:
     logging.critical("qwen mod forward not found.")
@@ -141,7 +143,7 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
         self.model.forward = patch_forward.__get__(
             self.model, Qwen2VLForConditionalGeneration
         )
-        self.small_model = Qwen2VLForAttnExtraction(self.model, self.processor)
+
         torch.cuda.empty_cache()
 
     def _prepare_content(self, inputs: list[dict[str, str]], dataset: str | None = None) -> list[dict[str, str]]:
@@ -194,40 +196,37 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
         messages = []
         if self.system_prompt is not None:
             messages.append({'role': 'system', 'content': self.system_prompt})
-        final_prompt = self._prepare_content(message, dataset=dataset)
-        messages.append({'role': 'user', 'content': final_prompt})
+        messages.append({'role': 'user', 'content': self._prepare_content(message, dataset=dataset)})
         if self.verbose:
             print(f'\033[31m{messages}\033[0m')
-        #print("=============> ", messages)
+
+        text = self.processor.apply_chat_template([messages], tokenize=False, add_generation_prompt=True)
         images, videos = process_vision_info([messages])
-        
-        image = images[0]
-        
-        h, w = image.size
+        inputs = self.processor(text=text.copy(), images=images, videos=videos, padding=True, return_tensors='pt')
+        inputs = inputs.to('cuda')
 
-        input_height,input_width = smart_resize(h, w, min_pixels=256*28*28, max_pixels=256*28*28)
-
-        image = image.resize((input_height, input_width))
+        # neg_images = generate_images(images, mode="noise")
+        # neg_inputs = self.processor(text=text, images=images, videos=videos, padding=True, return_tensors='pt')
 
         self.model.embed_weight = None
 
-        attn = self.small_model.extract_attention(
-            final_prompt,
-            image,
-            # [],
-            attn_type="contrastive",
-            single_token_generation=False,
-            contrast_layers=(14, 6),
+        output_ids = self.model.generate(
+            **inputs,
+            return_dict_in_generate=True,
+            output_attentions=True,
+            **self.generate_kwargs,
         )
-        bbox = bbox_from_att_image_adaptive(attn[0], image.size, bbox_size=14 * 14)
-        crop_image = image.crop(bbox)
-        images.append(crop_image)
 
-        messages[0]['content'].insert(1, {'type': 'image', 'image':crop_image})
-        text = self.processor.apply_chat_template([messages], tokenize=False, add_generation_prompt=True)
+        mean_attn_score = get_mean_attn_score(output_ids)
 
-        inputs = self.processor(text=text.copy(), images=images, videos=videos, padding=True, return_tensors='pt')
-        inputs = inputs.to('cuda')
+        visual_token_attn_score = get_visual_token_mean_attn_score(
+            mean_attn_score,
+            inputs,
+            self.model.config.vision_start_token_id,
+            self.model.config.vision_end_token_id,
+        )
+
+        #thresholds = [calculate_dynamic_threshold(v) for v in visual_token_attn_score]
 
         keep_perc = os.environ.get('KP', "0.6")
         keep_perc = float(keep_perc)
@@ -241,44 +240,42 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
         #dynamic_threshold = os.environ.get('DY', "False")
         #dynamic_threshold = dynamic_threshold.lower() == "true"
         
-        #if weighting_type == "suppress":
-        #    neg_images = generate_images(images, mode="noise")
-        #    neg_inputs = self.processor(text=text.copy(), images=neg_images, videos=videos, padding=True, return_tensors='pt')
-        #    neg_inputs = neg_inputs.to('cuda')
-        #    neg_output_ids = self.model.generate(
-        #        **neg_inputs,
-        #        return_dict_in_generate=True,
-        #        output_attentions=True,
-        #        **self.generate_kwargs,
-        #    )
+        if weighting_type == "suppress":
+            neg_images = generate_images(images, mode="noise")
+            neg_inputs = self.processor(text=text.copy(), images=neg_images, videos=videos, padding=True, return_tensors='pt')
+            neg_inputs = neg_inputs.to('cuda')
+            neg_output_ids = self.model.generate(
+                **neg_inputs,
+                return_dict_in_generate=True,
+                output_attentions=True,
+                **self.generate_kwargs,
+            )
 
-        #    neg_mean_attn_score = get_mean_attn_score(neg_output_ids)
-#
-        #    neg_visual_token_attn_score = get_visual_token_mean_attn_score(
-        #        neg_mean_attn_score,
-        #        neg_inputs,
-        #        self.model.config.vision_start_token_id,
-        #        self.model.config.vision_end_token_id,
-        #    )
+            neg_mean_attn_score = get_mean_attn_score(neg_output_ids)
 
-        #    vision_token_weight_per_image = [
-        #        get_visual_token_weight(
-        #            v, keep_perc, keep_weight, "suppress", linear_start, neg_v, suppress_alpha
-        #        )
-        #        for v, neg_v in zip(visual_token_attn_score, neg_visual_token_attn_score)
-        #    ]
+            neg_visual_token_attn_score = get_visual_token_mean_attn_score(
+                neg_mean_attn_score,
+                neg_inputs,
+                self.model.config.vision_start_token_id,
+                self.model.config.vision_end_token_id,
+            )
 
-        #else:
-        #    vision_token_weight_per_image = [
-        #        get_visual_token_weight(
-        #            v, keep_perc, keep_weight, weighting_type, linear_start
-        #        )
-        #        for v in visual_token_attn_score
-        #    ]
+            vision_token_weight_per_image = [
+                get_visual_token_weight(
+                    v, keep_perc, keep_weight, "suppress", linear_start, neg_v, suppress_alpha
+                )
+                for v, neg_v in zip(visual_token_attn_score, neg_visual_token_attn_score)
+            ]
 
-        attn_flat = attn[0].flatten()
-        weight = reweighted_vision_tokens(attn_flat, keep_percentage=keep_perc, weighting_type="linear")
-        self.model.embed_weight = weight.to(self.model.device)
+        else:
+            vision_token_weight_per_image = [
+                get_visual_token_weight(
+                    v, keep_perc, keep_weight, weighting_type, linear_start
+                )
+                for v in visual_token_attn_score
+            ]
+
+        self.model.embed_weight = torch.concat(vision_token_weight_per_image, dim=0).to(self.model.device)
 
         # Generate output based on modified inputs
         generated_ids = self.model.generate(**inputs, **self.generate_kwargs)
