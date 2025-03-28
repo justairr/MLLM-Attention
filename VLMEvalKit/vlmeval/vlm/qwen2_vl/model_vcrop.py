@@ -5,21 +5,18 @@ import sys
 import warnings
 import math
 import logging
-import copy
+
 import torch
 
 from ..base import BaseModel
 from .prompt import Qwen2VLPromptMixin
 from ...smp import get_rank_and_world_size, get_gpu_memory, auto_split_flag
 from qwen_vl_utils import smart_resize
-from transformers.cache_utils import (
-    DynamicCache,
-    StaticCache,
-)
-
 try:
     from .qwen import (
+        bbox_from_att_image_adaptive,
         Qwen2VLForAttnExtraction,
+        patch_forward,
         reweighted_vision_tokens
     )
 except ModuleNotFoundError as err:
@@ -141,9 +138,9 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
             )
             self.model.cuda().eval()
 
-        #self.model.forward = patch_forward.__get__(
-        #    self.model, Qwen2VLForConditionalGeneration
-        #)
+        self.model.forward = patch_forward.__get__(
+            self.model, Qwen2VLForConditionalGeneration
+        )
         self.small_model = Qwen2VLForAttnExtraction(self.model, self.processor)
         torch.cuda.empty_cache()
 
@@ -227,11 +224,10 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
         #images.append(crop_image)
 
         # messages[0]['content'].insert(1, {'type': 'image', 'image':crop_image})
-        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        #print(text)
-        text = text[:-1]
-        inputs = self.processor(text=text, images=images, videos=videos, return_tensors='pt')
-        inputs = inputs.to(self.model.device)
+        text = self.processor.apply_chat_template([messages], tokenize=False, add_generation_prompt=True)
+
+        inputs = self.processor(text=text.copy(), images=images, videos=videos, padding=True, return_tensors='pt')
+        inputs = inputs.to('cuda')
 
         keep_perc = os.environ.get('KP', "0.6")
         keep_perc = float(keep_perc)
@@ -281,47 +277,11 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
         #    ]
 
         attn_flat = attn[0].flatten()
-        weight = reweighted_vision_tokens(attn_flat, keep_percentage=keep_perc, weighting_type="linear").to(self.model.device)
-        
-        prompt_cache = StaticCache(
-            config=self.model.config,
-            max_batch_size=1,
-            max_cache_len=2048,
-            device=self.model.device,
-            dtype=self.model.dtype,
-            # layer_device_map={0: "cuda", 1: "cuda", 2: "cuda", 3: "cuda", 4: "cuda", 5: "cuda", 6: "cuda", 7: "cuda"}
-        )
-        with torch.no_grad():
-            # prompt_cache.reset()
-            prompt_cache = DynamicCache()
-            initial_outputs = self.model(**inputs, past_key_values=prompt_cache)
-            prompt_cache = initial_outputs.past_key_values
+        weight = reweighted_vision_tokens(attn_flat, keep_percentage=keep_perc, weighting_type="linear")
+        self.model.embed_weight = weight.to(self.model.device)
 
-        vision_start_token_id = self.model.config.vision_start_token_id
-        vision_end_token_id = self.model.config.vision_end_token_id
-        prefill_len = inputs["input_ids"].shape[1]
-        vision_start_token_indices = (
-            torch.where(inputs["input_ids"][0] == vision_start_token_id)[0] + 1
-        )
-        vision_end_token_indices = torch.where(inputs["input_ids"][0] == vision_end_token_id)[0]
-        assert len(vision_start_token_indices) == len(vision_end_token_indices) == 1, (
-            "vision_start_token_indices and vision_end_token_indices should have the same length"
-        )
-
-        for i, (k, v) in enumerate(
-            zip(prompt_cache.key_cache, prompt_cache.value_cache, strict=True)
-        ):
-            # print(f'key layer {i:2d}: {tuple(k.shape)}')
-            k[:, :, vision_start_token_indices:vision_end_token_indices, :] *= weight[
-                None, None, :, None
-            ]
-            v[:, :, vision_start_token_indices:vision_end_token_indices, :] *= weight[
-                None, None, :, None
-            ]
-        #print(self.generate_kwargs)
         # Generate output based on modified inputs
-        input_cache =copy.deepcopy(prompt_cache)
-        generated_ids = self.model.generate(**inputs, past_key_values=input_cache, **self.generate_kwargs)
+        generated_ids = self.model.generate(**inputs, **self.generate_kwargs)
     
         generated_ids = [
             output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs.input_ids, generated_ids)
