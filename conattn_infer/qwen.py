@@ -126,7 +126,9 @@ class Qwen2VLForAttnExtraction(nn.Module):
         self.model = (
             model
             if model is not None
-            else Qwen2VLForConditionalGeneration.from_pretrained(QWEN_2B_MODEL_ID)
+            else Qwen2VLForConditionalGeneration.from_pretrained(
+                QWEN_2B_MODEL_ID, torch_dtype="auto"
+            )
         )
         self.processor = Qwen2VLProcessor.from_pretrained(
             QWEN_2B_MODEL_ID, use_fast=True
