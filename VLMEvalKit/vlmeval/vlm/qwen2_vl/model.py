@@ -99,10 +99,10 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
         self.max_pixels = max_pixels
         self.generate_kwargs = dict(
             max_new_tokens=max_new_tokens,
-            top_p=top_p,
-            top_k=top_k,
+            #top_p=top_p,
+            #top_k=top_k,
             do_sample=do_sample,
-            temperature=temperature,
+            #temperature=temperature,
             repetition_penalty=repetition_penalty,
         )
         self.system_prompt = system_prompt
@@ -208,7 +208,7 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
         
         h, w = image.size
 
-        input_height,input_width = smart_resize(h, w, min_pixels=256*28*28, max_pixels=256*28*28)
+        input_height,input_width = smart_resize(h, w, min_pixels=messages[0]['content'][0]['min_pixels'], max_pixels=messages[0]['content'][0]['max_pixels'])
 
         image = image.resize((input_height, input_width))
         images[0] = image
@@ -228,9 +228,9 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
 
         # messages[0]['content'].insert(1, {'type': 'image', 'image':crop_image})
         text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        #print(text)
-        text = text[:-1]
-        inputs = self.processor(text=text, images=images, videos=videos, return_tensors='pt')
+        #print(messages)
+        #text = text[:-1]
+        inputs = self.processor(text=text[:-1], images=images, videos=videos, return_tensors='pt')
         inputs = inputs.to(self.model.device)
 
         keep_perc = os.environ.get('KP', "0.6")
@@ -320,8 +320,19 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
             ]
         #print(self.generate_kwargs)
         # Generate output based on modified inputs
+        new_inputs = self.processor(
+            images=images,
+            text=text,
+            return_tensors="pt",
+            # padding=True,
+        )
+        new_inputs = new_inputs.to(self.model.device)
+
         input_cache =copy.deepcopy(prompt_cache)
-        generated_ids = self.model.generate(**inputs, past_key_values=input_cache, **self.generate_kwargs)
+
+        #print(input_cache.value_cache[0].shape)
+        #print(input_cache.key_cache[0].shape)
+        generated_ids = self.model.generate(**new_inputs, past_key_values=input_cache, **self.generate_kwargs)
     
         generated_ids = [
             output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs.input_ids, generated_ids)
