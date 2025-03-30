@@ -60,6 +60,7 @@ def make_attn_hooks(
     # Clear Attention Output List if necessary
     if clear_attn_output:
         attn_outputs.clear()
+
     # Patch the attention mask if using SDPA originally
     # This is a hack to enforce the attention mask work with SDPA
     if (
@@ -67,6 +68,7 @@ def make_attn_hooks(
         or attn.config._attn_implementation_internal == "sdpa"
     ):
         AttentionMaskConverter._ignore_causal_mask_sdpa = lambda *_, **__: False
+
     # Set attention implementation to eager if necessary
     # if (
     #     attn.config._attn_implementation_autoset
@@ -77,6 +79,11 @@ def make_attn_hooks(
     attn.config._attn_implementation = "eager"
     attn.config._attn_implementation_internal = "eager"
     attn.config._attn_implementation_autoset = False
+
+    # Patch the forward method to use the super class's forward method
+    # aka. the original eager forward method
+    attn.forward = super(type(attn), attn).forward
+
     # Clear hooks if requested
     if clear_hooks and (len(attn._forward_pre_hooks) or len(attn._forward_hooks)):
         warnings.warn(
@@ -203,6 +210,7 @@ def merge_decoding_attn_maps(attn_maps: Sequence[torch.Tensor]) -> torch.Tensor:
     attn_map_np = attn_map.detach().cpu().numpy()
     attn_map_np = cv2.resize(attn_map_np, image_size, interpolation=cv2.INTER_NEAREST)
     return torch.from_numpy(attn_map_np)
+
 
 def get_visual_token_weight(
     vision_attn_weight,
