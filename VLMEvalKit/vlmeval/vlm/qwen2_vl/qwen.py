@@ -652,22 +652,14 @@ def patch_forward(
 def reweighted_vision_tokens(
     vision_attn_weight,
     keep_percentage,
-    weighting_type: Literal["linear", "uniform", "suppress"] = "linear",
+    keep_weight,
+    weighting_type: Literal["linear", "uniform"] = "linear",
     lowest_weight=0.6,
-    neg_attn_weight=None,
-    suppress_alpha=0.5,
 ):
-    if weighting_type == "suppress":
-        if neg_attn_weight is None:
-            raise ValueError("neg_attn_weight must be provided for suppress mode")
-        # 使用负样例注意力权重进行抑制
-        weight_vision_token = 1 - suppress_alpha * neg_attn_weight
-        return weight_vision_token
-
     sorted_indices = torch.argsort(vision_attn_weight, descending=True)
     num_tokens_to_keep = int(len(vision_attn_weight) * keep_percentage)
     weight_vision_token = torch.zeros_like(vision_attn_weight, dtype=torch.float)
-    weight_vision_token[sorted_indices[:num_tokens_to_keep]] = 1.0
+    weight_vision_token[sorted_indices[:num_tokens_to_keep]] = keep_weight
     if weighting_type == "linear":
         weight_vision_token[sorted_indices[num_tokens_to_keep:]] = torch.linspace(
             lowest_weight, 1.0, len(vision_attn_weight) - num_tokens_to_keep

@@ -240,8 +240,8 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
         linear_start = os.environ.get('LS', "0.0")
         linear_start = float(linear_start)
         weighting_type = os.environ.get('WT', "linear")
-        suppress_alpha = os.environ.get('SA', "0.5")
-        suppress_alpha = float(suppress_alpha)
+        #suppress_alpha = os.environ.get('SA', "0.5")
+        #suppress_alpha = float(suppress_alpha)
         #dynamic_threshold = os.environ.get('DY', "False")
         #dynamic_threshold = dynamic_threshold.lower() == "true"
         
@@ -281,7 +281,7 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
         #    ]
 
         attn_flat = attn[0].flatten()
-        weight = reweighted_vision_tokens(attn_flat, keep_percentage=keep_perc, weighting_type="linear").to(self.model.device)
+        weight = reweighted_vision_tokens(attn_flat, keep_percentage=keep_perc, keep_weight=keep_weight, weighting_type=weighting_type, lowest_weight=linear_start).to(self.model.device)
         
         prompt_cache = StaticCache(
             config=self.model.config,
