@@ -283,16 +283,7 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
         attn_flat = attn[0].flatten()
         weight = reweighted_vision_tokens(attn_flat, keep_percentage=keep_perc, keep_weight=keep_weight, weighting_type=weighting_type, lowest_weight=linear_start).to(self.model.device)
         
-        prompt_cache = StaticCache(
-            config=self.model.config,
-            max_batch_size=1,
-            max_cache_len=2048,
-            device=self.model.device,
-            dtype=self.model.dtype,
-            # layer_device_map={0: "cuda", 1: "cuda", 2: "cuda", 3: "cuda", 4: "cuda", 5: "cuda", 6: "cuda", 7: "cuda"}
-        )
         with torch.no_grad():
-            # prompt_cache.reset()
             prompt_cache = DynamicCache()
             initial_outputs = self.model(**inputs, past_key_values=prompt_cache)
             prompt_cache = initial_outputs.past_key_values

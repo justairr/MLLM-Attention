@@ -9,6 +9,7 @@ from ...dataset import DATASET_TYPE, DATASET_MODALITY
 import copy
 import requests
 from llava.model.language_model.llava_llama import LlavaLlamaForCausalLM
+from transformers.generation.utils import DynamicCache
 
 try:
     from .llava_patch import (
@@ -16,7 +17,6 @@ try:
         get_mean_attn_score,
         get_visual_token_mean_attn_score_llava,
         get_visual_token_weight,
-        patch_prepare
     )
 except ModuleNotFoundError as err:
     logging.critical("qwen mod forward not found.")
@@ -91,7 +91,6 @@ class LLaVA(BaseModel):
             f"Following kwargs received: {self.kwargs}, will use as generation config. "
         )
 
-        self.model.prepare_inputs_labels_for_multimodal = patch_prepare.__get__(self.model, LlavaLlamaForCausalLM)
 
     def use_custom_prompt(self, dataset):
         assert dataset is not None
@@ -231,7 +230,6 @@ class LLaVA(BaseModel):
 
         #print(message)
 
-        self.model.embed_weight = None
 
         with torch.inference_mode():
             outputs = self.model.generate(
@@ -265,13 +263,39 @@ class LLaVA(BaseModel):
             for v in vw
         ]
 
-        self.model.embed_weight = torch.concat(vision_token_weight_per_image, dim=0).to(self.model.device)
+        vision_start_token_indices = torch.where(
+            input_ids[0] == 200
+        )[0]
+        
+
+        with torch.no_grad():
+            prompt_cache = DynamicCache()
+            initial_outputs = self.model(
+                input_ids[:, :-1],
+                images=image_tensor,
+                past_key_values=prompt_cache,
+                return_dict_in_generate=True,
+                stopping_criteria=[stopping_criteria],
+                **self.kwargs,
+            )
+            prompt_cache = initial_outputs.past_key_values
+
+        # vision_start_token_id = self.model.config.vision_start_token_id
+        # vision_end_token_id = self.model.config.vision_end_token_id
+        prefill_len = input_ids.shape[1]
+        vision_start_token_indices = torch.where(input_ids[0] == 200)[0]
+        vision_end_token_indices = vision_start_token_indices + 576
+
+        for i, (k, v) in enumerate(zip(prompt_cache.key_cache, prompt_cache.value_cache, strict=True)):
+            k[:, :, vision_start_token_indices:vision_end_token_indices, :] *= vision_token_weight_per_image[0]
+            v[:, :, vision_start_token_indices:vision_end_token_indices, :] *= vision_token_weight_per_image[0]
 
 
         with torch.inference_mode():
             output_ids = self.model.generate(
                 input_ids,
                 images=image_tensor,
+                past_key_values=prompt_cache,
                 stopping_criteria=[stopping_criteria],
                 **self.kwargs,
             )
