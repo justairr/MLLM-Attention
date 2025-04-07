@@ -14,6 +14,7 @@ from qwen_vl_utils import smart_resize
 
 from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VLCausalLMOutputWithPast
 from PIL import Image
+import math
 
 QWEN_2B_MODEL_ID = "Qwen/Qwen2-VL-2B-Instruct"
 QWEN_7B_MODEL_ID = "Qwen/Qwen2-VL-7B-Instruct"
@@ -653,7 +654,7 @@ def reweighted_vision_tokens(
     vision_attn_weight,
     keep_percentage,
     keep_weight,
-    weighting_type: Literal["linear", "uniform"] = "linear",
+    weighting_type: Literal["linear", "exp", "uniform"] = "linear",
     lowest_weight=0.6,
 ):
     sorted_indices = torch.argsort(vision_attn_weight, descending=True)
@@ -664,6 +665,10 @@ def reweighted_vision_tokens(
         weight_vision_token[sorted_indices[num_tokens_to_keep:]] = torch.linspace(
             lowest_weight, 1.0, len(vision_attn_weight) - num_tokens_to_keep
         )
-    else:
+    elif weighting_type == "uniform":
         weight_vision_token[sorted_indices[num_tokens_to_keep:]] = lowest_weight
+    else:
+        weight_vision_token[sorted_indices[num_tokens_to_keep:]] = torch.exp(
+        torch.linspace(0, math.log(lowest_weight), len(sorted_indices) - num_tokens_to_keep)
+    )
     return weight_vision_token

@@ -5,26 +5,12 @@ import sys
 import warnings
 import math
 import logging
-import copy
+
 import torch
 
 from ..base import BaseModel
 from .prompt import Qwen2VLPromptMixin
 from ...smp import get_rank_and_world_size, get_gpu_memory, auto_split_flag
-from qwen_vl_utils import smart_resize
-from transformers.cache_utils import (
-    DynamicCache,
-    StaticCache,
-)
-
-try:
-    from .qwen import (
-        Qwen2VLForAttnExtraction,
-        reweighted_vision_tokens
-    )
-except ModuleNotFoundError as err:
-    logging.critical("qwen mod forward not found.")
-    raise err
 
 
 def ensure_image_url(image: str) -> str:
@@ -87,7 +73,6 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
         top_p=0.001,
         top_k=1,
         temperature=0.01,
-        do_sample=False,
         repetition_penalty=1.0,
         use_custom_prompt: bool = True,
         system_prompt: str | None = None,
@@ -99,10 +84,9 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
         self.max_pixels = max_pixels
         self.generate_kwargs = dict(
             max_new_tokens=max_new_tokens,
-            #top_p=top_p,
-            #top_k=top_k,
-            do_sample=do_sample,
-            #temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            temperature=temperature,
             repetition_penalty=repetition_penalty,
         )
         self.system_prompt = system_prompt
@@ -123,35 +107,24 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
         max_gpu_mem = max(gpu_mems) if gpu_mems != [] else -1
         assert max_gpu_mem > 0
 
-        ## If only one process and GPU memory is less than 40GB
-        #if '72b' in self.model_path.lower():
-        #    self.model = Qwen2VLForConditionalGeneration.from_pretrained(
-        #        model_path, torch_dtype='auto', device_map=split_model(), attn_implementation='eager'
-        #    )
-        #    self.model.eval()
-        #elif auto_split_flag():
-        #    assert world_size == 1, 'Only support world_size == 1 when AUTO_SPLIT is set for non-72B Qwen2-VL'
-        #    # Will Use All GPUs to run one model
-        #    self.model = Qwen2VLForConditionalGeneration.from_pretrained(
-        #        model_path, torch_dtype='auto', device_map='auto', attn_implementation='eager'
-        #    )
-        #else:
-        #    self.model = Qwen2VLForConditionalGeneration.from_pretrained(
-        #        model_path, torch_dtype='auto', device_map='cpu', attn_implementation='eager'
-        #    )
-        #    self.model.cuda().eval()
+        # If only one process and GPU memory is less than 40GB
+        if '72b' in self.model_path.lower():
+            self.model = Qwen2VLForConditionalGeneration.from_pretrained(
+                model_path, torch_dtype='auto', device_map=split_model(), attn_implementation='sdpa'
+            )
+            self.model.eval()
+        elif auto_split_flag():
+            assert world_size == 1, 'Only support world_size == 1 when AUTO_SPLIT is set for non-72B Qwen2-VL'
+            # Will Use All GPUs to run one model
+            self.model = Qwen2VLForConditionalGeneration.from_pretrained(
+                model_path, torch_dtype='auto', device_map='auto', attn_implementation='sdpa'
+            )
+        else:
+            self.model = Qwen2VLForConditionalGeneration.from_pretrained(
+                model_path, torch_dtype='auto', device_map='cpu', attn_implementation='sdpa'
+            )
+            self.model.cuda().eval()
 
-        self.model = Qwen2VLForConditionalGeneration.from_pretrained(
-                model_path, torch_dtype='auto', attn_implementation='sdpa'
-            ).to("cuda:0")
-        self.model.eval()
-
-        self.tb_model = Qwen2VLForConditionalGeneration.from_pretrained(
-                "Qwen/Qwen2-VL-2B-Instruct", torch_dtype='auto', attn_implementation='eager'
-            ).to("cuda:1")
-        self.tb_model.eval()
-        self.tb_processor = Qwen2VLProcessor.from_pretrained("Qwen/Qwen2-VL-2B-Instruct")
-        self.small_model = Qwen2VLForAttnExtraction(self.tb_model, self.tb_processor)
         torch.cuda.empty_cache()
 
     def _prepare_content(self, inputs: list[dict[str, str]], dataset: str | None = None) -> list[dict[str, str]]:
@@ -204,97 +177,19 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
         messages = []
         if self.system_prompt is not None:
             messages.append({'role': 'system', 'content': self.system_prompt})
-        final_prompt = self._prepare_content(message, dataset=dataset)
-        messages.append({'role': 'user', 'content': final_prompt})
+        messages.append({'role': 'user', 'content': self._prepare_content(message, dataset=dataset)})
         if self.verbose:
             print(f'\033[31m{messages}\033[0m')
-        #print("=============> ", messages)
+
+        text = self.processor.apply_chat_template([messages], tokenize=False, add_generation_prompt=True)
         images, videos = process_vision_info([messages])
-        
-        image = images[0]
-        
-        h, w = image.size
+        inputs = self.processor(text=text, images=images, videos=videos, padding=True, return_tensors='pt')
+        inputs = inputs.to('cuda')
 
-        input_height,input_width = smart_resize(h, w, min_pixels=messages[0]['content'][0]['min_pixels'], max_pixels=messages[0]['content'][0]['max_pixels'])
-
-        image = image.resize((input_height, input_width))
-        images[0] = image
-        self.model.embed_weight = None
-
-        attn = self.small_model.extract_attention(
-            final_prompt,
-            image,
-            # [],
-            attn_type="contrastive",
-            single_token_generation=False,
-            contrast_layers=(14, 6),
+        generated_ids = self.model.generate(
+            **inputs,
+            **self.generate_kwargs,
         )
-        #bbox = bbox_from_att_image_adaptive(attn[0], image.size, bbox_size=14 * 14)
-        #crop_image = image.crop(bbox)
-        #images.append(crop_image)
-
-        # messages[0]['content'].insert(1, {'type': 'image', 'image':crop_image})
-        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        #print(messages)
-        #text = text[:-1]
-        inputs = self.processor(text=text[:-1], images=images, videos=videos, return_tensors='pt')
-        inputs = inputs.to(self.model.device)
-
-        keep_perc = os.environ.get('KP', "0.4")
-        keep_perc = float(keep_perc)
-        keep_weight = os.environ.get('KW', "1.0")
-        keep_weight = float(keep_weight)
-        linear_start = os.environ.get('LS', "0.6")
-        linear_start = float(linear_start)
-        weighting_type = os.environ.get('WT', "linear")
-
-
-        attn_flat = attn[0].flatten()
-        weight = reweighted_vision_tokens(attn_flat, keep_percentage=keep_perc, keep_weight=keep_weight, weighting_type=weighting_type, lowest_weight=linear_start).to(self.model.device)
-        
-        with torch.no_grad():
-            # prompt_cache.reset()
-            prompt_cache = DynamicCache()
-            initial_outputs = self.model(**inputs, past_key_values=prompt_cache)
-            prompt_cache = initial_outputs.past_key_values
-
-        vision_start_token_id = self.model.config.vision_start_token_id
-        vision_end_token_id = self.model.config.vision_end_token_id
-        prefill_len = inputs["input_ids"].shape[1]
-        vision_start_token_indices = (
-            torch.where(inputs["input_ids"][0] == vision_start_token_id)[0] + 1
-        )
-        vision_end_token_indices = torch.where(inputs["input_ids"][0] == vision_end_token_id)[0]
-        assert len(vision_start_token_indices) == len(vision_end_token_indices) == 1, (
-            "vision_start_token_indices and vision_end_token_indices should have the same length"
-        )
-
-        for i, (k, v) in enumerate(
-            zip(prompt_cache.key_cache, prompt_cache.value_cache, strict=True)
-        ):
-            # print(f'key layer {i:2d}: {tuple(k.shape)}')
-            k[:, :, vision_start_token_indices:vision_end_token_indices, :] *= weight[
-                None, None, :, None
-            ]
-            v[:, :, vision_start_token_indices:vision_end_token_indices, :] *= weight[
-                None, None, :, None
-            ]
-        #print(self.generate_kwargs)
-        # Generate output based on modified inputs
-        new_inputs = self.processor(
-            images=images,
-            text=text,
-            return_tensors="pt",
-            # padding=True,
-        )
-        new_inputs = new_inputs.to(self.model.device)
-
-        input_cache =copy.deepcopy(prompt_cache)
-
-        #print(input_cache.value_cache[0].shape)
-        #print(input_cache.key_cache[0].shape)
-        generated_ids = self.model.generate(**new_inputs, past_key_values=input_cache, **self.generate_kwargs)
-    
         generated_ids = [
             output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs.input_ids, generated_ids)
         ]
@@ -319,8 +214,7 @@ class Qwen2VLChat(Qwen2VLPromptMixin, BaseModel):
                     break
             if end is not None:
                 response = resp[:end]
-    
+
         if self.verbose:
             print(f'\033[32m{response}\033[0m')
-    
         return response

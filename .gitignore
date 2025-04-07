@@ -4,6 +4,16 @@ VLMEvalKit/min*
 VLMEvalKit/result*
 infer*
 results*
+time*
+Qwen_384
+Qwen_original_*
+Qwen_results_384
+Qwen_vcrop_*
+Qwen_256*
+
+*.png
+
+*.ipynb
 
 grid_*
 
