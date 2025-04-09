@@ -3,6 +3,7 @@ import torch
 from transformers import AutoModelForCausalLM
 from transformers.generation.utils import DynamicCache
 import warnings
+from deepseek_vl.utils.io import load_pil_images
 from .deepseek_vl_attn import DeepseekVLForAttnExtraction, reweighted_vision_tokens
 from .base import BaseModel
 from ..smp import *
@@ -69,7 +70,6 @@ class DeepSeekVL(BaseModel):
 
     def generate_inner(self, message, dataset=None):
         conversation = self.prepare_inputs(message)
-        from deepseek_vl.utils.io import load_pil_images
 
         keep_perc = os.environ.get('KP', "0.4")
         keep_perc = float(keep_perc)

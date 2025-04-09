@@ -278,7 +278,10 @@ class DeepseekVLForAttnExtraction(nn.Module):
         Returns:
             the visual attention map, shape: image x (layer, head, n_total_tokens, n_visual_tokens_per_image)
         """
-        return (full_attn_map[:, 0, :, :, inputs["images_seq_mask"][0].cpu()],)
+        mask = inputs["images_seq_mask"][0].cpu()
+        concate_attn_map = full_attn_map[:, 0, :, :, :len(mask)]
+        # print(mask.shape)
+        return (concate_attn_map[:, :, :, mask],)
 
     @torch.no_grad()
     def extract_attention(
@@ -315,6 +318,9 @@ class DeepseekVLForAttnExtraction(nn.Module):
                 "content": "".join(["<image_placeholder>"] * len(images)) + text_prompt,
             }
         ]
+        # print("##########################")
+        # print(conversation)
+        # print("##########################")
 
         prepare_inputs = self.processor(
             conversations=conversation, images=images, force_batchify=True
